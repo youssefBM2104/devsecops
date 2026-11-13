@@ -1,8 +1,7 @@
 # Rapport TP03 – Pipeline CI/CD pour une application Web PHP
 
-**Module :** DevSecOps – SI5
-**Groupe :** _Nom1 / Nom2 / Nom3 / Nom4_ (à compléter)
-**Date :** 13/11/2026
+**Module :** DevSecOps – SI5  
+**Groupe :** Youssef Ben Mzoughia / Fares Kobbi / Hammoud Younes
 
 ---
 
@@ -164,8 +163,6 @@ Le job `build-docker-image` :
 3. se connecte à GHCR avec `docker login` (jeton lu via `--password-stdin`, donc non affiché dans les logs) ;
 4. construit l'image avec `Docker/Dockerfile` en passant les métadonnées en `--build-arg` (date, commit, URL du dépôt, version) ;
 5. pousse l'image avec `docker push`.
-
-Le serveur est durci dans `/etc/ssh/sshd_config.d/99-hardening.conf` : `PasswordAuthentication no` et `PermitRootLogin no`. Une tentative de connexion sans la bonne clé renvoie `Permission denied (publickey)`, et seule la méthode `publickey` est proposée (si le mot de passe était actif, le serveur afficherait `publickey,password`).
 
 #### Variables CircleCI
 
@@ -342,6 +339,8 @@ CircleCI se connecte au serveur avec une **paire de clés SSH** dédiée au dép
 
 L'empreinte est écrite **en clair** dans le fichier de configuration, car CircleCI n'interpole pas les variables d'environnement dans `add_ssh_keys`.
 
+Le serveur est durci dans `/etc/ssh/sshd_config.d/99-hardening.conf` : `PasswordAuthentication no` et `PermitRootLogin no`. Une tentative de connexion sans la bonne clé renvoie `Permission denied (publickey)`, et seule la méthode `publickey` est proposée (si le mot de passe était actif, le serveur afficherait `publickey,password`).
+
 #### Variables CircleCI
 
 | Variable | Rôle |
@@ -411,7 +410,7 @@ L'application est ensuite accessible à l'adresse publique du serveur et renvoie
 ![Application en production](images/3-3-application.png)
 *Figure 20 – Application déployée sur EC2 (image PNG 600×200)*
 
-#### Limites constatées (reprises en partie 5)
+#### Limites constatées
 
 - L'application est servie en **HTTP** (navigateur : « Not Secure ») : il manque un certificat TLS.
 - Le déploiement actuel **n'utilise pas l'image Docker** construite et publiée sur GHCR : le serveur met à jour le code par `git pull`. L'image et le déploiement forment deux chaînes distinctes.
@@ -556,4 +555,4 @@ Aucun secret ne figure dans le dépôt Git. Le secret de l'application (`APP_SEC
 - **Reproduire localement** (dans la même image Docker que la CI) permet de trouver la vraie cause d'un échec avant de modifier la configuration : c'est ce qui a permis de corriger `test-phpunit` et de valider les quatre nouveaux jobs.
 - **Valider la configuration avec l'outil officiel** (`circleci config validate`) avant chaque push évite les pipelines refusés.
 - **Figer les versions** des outils rend les résultats reproductibles.
-- Les limites restantes (HTTPS, image Docker non utilisée pour le déploiement, secret non injecté en production, environnements non identiques) sont traitées dans la partie 5.
+- Des limites restent à traiter et constituent des pistes d'amélioration : HTTPS, image Docker non utilisée pour le déploiement, secret non injecté en production, environnements non identiques (voir « Limites constatées » en 3.3).
