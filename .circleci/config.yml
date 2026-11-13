@@ -70,6 +70,45 @@ executors:
 
 
 
+commands:
+  deploy-over-ssh:
+    description: Déploie l'application sur une instance EC2 via SSH (git pull + composer install + redémarrage de PHP-FPM)
+    parameters:
+      fingerprint:
+        type: string
+        description: Empreinte de la clé SSH ajoutée dans CircleCI (non interpolable depuis une variable d'environnement)
+      user:
+        type: env_var_name
+      host:
+        type: env_var_name
+      directory:
+        type: env_var_name
+    steps:
+      - add_ssh_keys:
+          fingerprints:
+            - "<< parameters.fingerprint >>"
+      - run:
+          name: Trust EC2 host key
+          command: |
+            mkdir -p ~/.ssh
+            ssh-keyscan -H "${<< parameters.host >>}" >> ~/.ssh/known_hosts
+      - run:
+          name: Deploy to AWS EC2
+          command: |
+            # Heredoc entre quotes : rien n'est évalué sur le runner CircleCI, tout s'exécute sur le serveur
+            ssh -o BatchMode=yes "${<< parameters.user >>}@${<< parameters.host >>}" \
+              "DEPLOY_DIR='${<< parameters.directory >>}' DEPLOY_BRANCH='${CIRCLE_BRANCH}' bash -s" <<'EOF'
+            set -euo pipefail
+            cd "$DEPLOY_DIR"
+            git fetch origin
+            git checkout "$DEPLOY_BRANCH"
+            git pull --ff-only origin "$DEPLOY_BRANCH"
+            composer install --no-dev --optimize-autoloader --no-interaction --prefer-dist
+            # La version de PHP-FPM est détectée sur le serveur (et non sur le runner)
+            PHP_FPM_VERSION=$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')
+            (flock -w 10 9 || exit 1; sudo service "php${PHP_FPM_VERSION}-fpm" restart) 9>/tmp/fpm.lock
+            EOF
+
 jobs:
   debug-info:
     executor: php-executor
@@ -304,29 +343,20 @@ jobs:
   deploy-ssh-staging:
     executor: simple-executor
     steps:
-      - add_ssh_keys:
-          fingerprints:
-            - "${STAGING_SSH_FINGERPRINT}"
-      - deploy:
-          name: Deploy to AWS
-          command: |
-            set -x
-            ssh -o StrictHostKeyChecking=no $STAGING_SSH_USER@$STAGING_SSH_HOST \<< EOF
-            PHP_FPM_VERSION=$(php -v | head -n 1 | cut -d ' ' -f 2 | cut -d '.' -f 1-2)
-            cd $STAGING_DEPLOY_DIRECTORY
-            git pull origin $CIRCLE_BRANCH
-            composer install --optimize-autoloader --no-interaction --prefer-dist
-            (flock -w 10 9 || exit 1; sudo -S service php${PHP_FPM_VERSION}-fpm restart ) 9>/tmp/fpm.lock
-            EOF
+      - deploy-over-ssh:
+          fingerprint: "REMPLACER_PAR_LE_FINGERPRINT"
+          user: STAGING_SSH_USER
+          host: STAGING_SSH_HOST
+          directory: STAGING_DEPLOY_DIRECTORY
 
-
-  # TODO (partie 3.3) : remplacer ce job temporaire par le vrai déploiement sur AWS EC2
   deploy-ssh-production:
     executor: simple-executor
     steps:
-      - run:
-          name: Placeholder production deployment
-          command: echo "Production deployment not implemented yet"
+      - deploy-over-ssh:
+          fingerprint: "REMPLACER_PAR_LE_FINGERPRINT"
+          user: PRODUCTION_SSH_USER
+          host: PRODUCTION_SSH_HOST
+          directory: PRODUCTION_DEPLOY_DIRECTORY
 
 
 workflows:
@@ -358,6 +388,15 @@ workflows:
             - build-setup
       - hold:
           type: approval
+          requires:
+            - lint-phpcs
+            - security-check-dependencies
+            - test-phpunit
+            - security-infisical-check
+            - metrics-phpmetrics
+            - metrics-phploc
+            - lint-phpmd
+            - lint-php-doc-check
           filters:
             branches:
               only:

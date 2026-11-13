@@ -249,3 +249,68 @@ Le job réussit en 13 secondes : l'authentification et la lecture du secret fonc
 ![Pipeline avec le job security-infisical-check](images/2-3-pipeline-infisical.png)
 *Figure 10 – Job `security-infisical-check` réussi dans `main_workflow`*
 
+
+
+## Partie 3 – Extension du pipeline
+
+Quatre jobs ont été ajoutés à `main_workflow`. Chacun dépend de `build-setup`, s'exécute dans son propre conteneur (`cimg/php:8.2`) en parallèle des autres vérifications, installe son outil avec Composer en **version fixée** (pour des résultats reproductibles) et publie son rapport en **artefact** CircleCI. Les commandes ont d'abord été testées localement dans la même image avant d'être intégrées au pipeline.
+
+### 3.1 Jobs d'évaluation du code
+
+| Job | Outil | Rôle |
+|---|---|---|
+| `metrics-phpmetrics` | `phpmetrics/phpmetrics` 2.11.0 | Calcule des métriques de qualité (complexité cyclomatique, maintenabilité, couplage, bugs estimés) et génère un rapport HTML et JSON. |
+| `metrics-phploc` | `phploc/phploc` 7.0.2 | Mesure la taille du projet (lignes de code, lignes de commentaires, classes, méthodes). |
+
+```bash
+phpmetrics --report-html=phpmetrics-report --report-json=phpmetrics-report.json src
+phploc src | tee phploc-report.txt
+```
+
+Le rapport PhpMetrics est publié sous forme de site HTML consultable (dossier `phpmetrics-report`).
+
+![Artefacts du job metrics-phpmetrics](images/3-1-phpmetrics-artefacts.png)
+*Figure 11 – Artefacts du job `metrics-phpmetrics` (rapport HTML)*
+
+Sur le projet, le rapport indique : 0 violation, 1 classe (`App\ImageCreator`), une complexité cyclomatique moyenne de 2,00 par classe et environ 0,15 bug estimé par classe, ce qui correspond à un code très simple et facile à maintenir. `phploc` donne de son côté 70 lignes de code dont 6 lignes de commentaires (les deux outils ne comptent pas les lignes de la même façon).
+
+![Rapport PhpMetrics](images/3-1-phpmetrics-rapport.png)
+*Figure 12 – Rapport PhpMetrics ouvert dans un navigateur*
+
+### 3.2 Intégration de la qualité du code
+
+| Job | Outil | Rôle |
+|---|---|---|
+| `lint-phpmd` | `phpmd/phpmd` 3.0.0 | Détecte les mauvaises pratiques (code complexe, noms trop courts, variables inutilisées, usage de superglobales…) avec les jeux de règles `cleancode`, `codesize`, `controversial`, `design`, `naming` et `unusedcode`. |
+| `lint-php-doc-check` | `niels-de-blaauw/php-doc-check` 0.4.1 | Vérifie que les fonctions et méthodes sont documentées (PHPDoc). |
+
+```bash
+phpmd src text cleancode,codesize,controversial,design,naming,unusedcode
+php-doc-check src
+```
+
+**Choix de conception.** PHPMD retourne le code de sortie 2 lorsqu'il trouve des violations. Le job accepte ce code (0 ou 2) afin de publier le rapport **sans bloquer** le pipeline, comme le fait déjà `lint-phpcs`, mais échoue pour tout autre code d'erreur (échec de l'outil). Les scripts utilisent `set -eo pipefail` pour qu'une erreur ne soit pas masquée par un `tee`. L'installation de `php-doc-check` est faite dans un job séparé car cet outil est en conflit de dépendances avec les autres si on les installe ensemble.
+
+![Artefacts du job lint-phpmd](images/3-2-phpmd-artefacts.png)
+*Figure 13 – Artefact `phpmd-report.txt` du job `lint-phpmd`*
+
+PHPMD relève trois problèmes réels dans `src/ImageCreator.php` :
+
+![Rapport PHPMD](images/3-2-phpmd-rapport.png)
+*Figure 14 – Contenu de `phpmd-report.txt`*
+
+| Ligne | Règle | Problème |
+|---|---|---|
+| 17 | `ShortVariable` | La propriété `$im` a un nom trop court. |
+| 26 (×2) | `Superglobals` | Le constructeur lit directement la superglobale `$_ENV`. |
+
+`php-doc-check` ne signale aucune méthode non documentée.
+
+#### Résultat
+
+Les quatre nouveaux jobs s'exécutent avec succès à côté des jobs existants ; `main_workflow` s'arrête toujours sur `hold` (approbation manuelle avant le déploiement).
+
+Lors de ce run, `build-docker-image` a échoué une première fois pendant l'envoi de l'image vers GHCR (`unknown blob`) : il s'agit d'une erreur transitoire du registre (l'image fait environ 1,1 Go), sans lien avec la configuration, puisque le même job avait déjà réussi avec le même code. Un simple **re-run** du workflow a suffi, comme le montre l'historique ci-dessous (tentative échouée, puis re-run réussi).
+
+![Pipeline complet avec les nouveaux jobs](images/3-pipeline-complet.png)
+*Figure 15 – Pipeline complet : jobs de métriques et de qualité verts, `hold` en attente, `build-docker-image` réussi après re-run*
