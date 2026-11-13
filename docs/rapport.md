@@ -204,3 +204,48 @@ Le paquet est **privé** par défaut : tout client qui doit le télécharger (pa
 
 ![Image Docker publiée sur GHCR](images/2-2-ghcr.png)
 *Figure 6 – Paquet `devsecops` (tag `main`, privé) publié sur GitHub Container Registry*
+
+
+### 2.3 Gestion des secrets avec Infisical
+
+L'application utilise un secret (`APP_SECRET`). Pour qu'il ne figure ni dans le dépôt Git, ni dans l'image Docker, ni dans le fichier de configuration CircleCI, il est stocké dans **Infisical**, un gestionnaire de secrets.
+
+#### Configuration d'Infisical
+
+1. Création d'une organisation et d'un projet **Secrets Management** (`devsecops-tp`).
+2. Ajout du secret `APP_SECRET` dans l'environnement `dev` (les environnements disponibles sont `dev`, `staging` et `prod`).
+3. Création d'une **identité machine** (`circleci`) avec la méthode d'authentification **Universal Auth**, rattachée au projet avec le rôle **Member**. Cette identité est destinée aux outils automatisés (ici CircleCI) : elle évite d'utiliser un compte personnel.
+4. Génération d'un **Client Secret** pour cette identité (affiché une seule fois).
+
+![Secret APP_SECRET dans Infisical](images/2-3-secrets.png)
+*Figure 7 – Secret `APP_SECRET` dans le projet Infisical (environnement Development, valeur masquée)*
+
+![Identité machine circleci](images/2-3-identite.png)
+*Figure 8 – Identité machine `circleci` (Universal Auth, rôle Member sur le projet)*
+
+#### Intégration dans le pipeline
+
+Le **Client ID** et le **Client Secret** sont enregistrés dans CircleCI sous forme de variables d'environnement (jamais dans le dépôt) :
+
+| Variable | Contenu |
+|---|---|
+| `INFISICAL_CLIENT_ID` | Identifiant de l'identité machine |
+| `INFISICAL_CLIENT_SECRET` | Secret de l'identité machine |
+
+Un job `security-infisical-check` a été ajouté à `main_workflow`. Il :
+
+1. installe le client **Infisical CLI** ;
+2. s'authentifie avec `infisical login --method=universal-auth` pour obtenir un jeton d'accès temporaire ;
+3. exécute `infisical run --projectId <id> --env dev -- ...` qui injecte les secrets du projet dans l'environnement d'une commande, et vérifie que `APP_SECRET` est bien disponible ;
+4. n'affiche **jamais** la valeur du secret dans les logs.
+
+![Variables CircleCI](images/2-3-variables.png)
+*Figure 9 – Variables CircleCI : identifiants GHCR et Infisical (valeurs masquées)*
+
+Seuls l'identifiant du projet et le nom de l'environnement figurent dans le fichier `config.yml` ; ce ne sont pas des informations sensibles.
+
+Le job réussit en 13 secondes : l'authentification et la lecture du secret fonctionnent. Le client Infisical étant déjà présent dans l'image Docker (voir 1.2), le conteneur pourra lancer l'application avec `infisical run` pour recevoir `APP_SECRET` au démarrage, ce qui sera utilisé lors du déploiement en production (partie 3.3).
+
+![Pipeline avec le job security-infisical-check](images/2-3-pipeline-infisical.png)
+*Figure 10 – Job `security-infisical-check` réussi dans `main_workflow`*
+

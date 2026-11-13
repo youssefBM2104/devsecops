@@ -165,6 +165,78 @@ jobs:
           command: ./vendor/bin/phpunit --testsuite=Unit
 
 
+  metrics-phpmetrics:
+    executor: php-executor
+    steps:
+      - *attach_workspace
+      - run:
+          name: Install phpmetrics
+          command: composer global require --no-interaction phpmetrics/phpmetrics:2.11.0
+      - run:
+          name: Run phpmetrics
+          command: |
+            set -eo pipefail
+            BIN=$(composer global config bin-dir --absolute --quiet)
+            $BIN/phpmetrics --report-html=phpmetrics-report --report-json=phpmetrics-report.json src
+      - store_artifacts:
+          path: phpmetrics-report
+          destination: phpmetrics-report
+
+  metrics-phploc:
+    executor: php-executor
+    steps:
+      - *attach_workspace
+      - run:
+          name: Install phploc
+          command: composer global require --no-interaction phploc/phploc:7.0.2
+      - run:
+          name: Run phploc
+          command: |
+            set -eo pipefail
+            BIN=$(composer global config bin-dir --absolute --quiet)
+            $BIN/phploc src | tee phploc-report.txt
+      - store_artifacts:
+          path: phploc-report.txt
+          destination: phploc-report.txt
+
+  lint-phpmd:
+    executor: php-executor
+    steps:
+      - *attach_workspace
+      - run:
+          name: Install phpmd
+          command: composer global require --no-interaction phpmd/phpmd:3.0.0
+      - run:
+          name: Run phpmd
+          command: |
+            set -eo pipefail
+            BIN=$(composer global config bin-dir --absolute --quiet)
+            # PHPMD retourne 2 s'il trouve des violations : elles sont publiées en rapport sans bloquer le pipeline
+            code=0
+            $BIN/phpmd src text cleancode,codesize,controversial,design,naming,unusedcode > phpmd-report.txt || code=$?
+            cat phpmd-report.txt
+            [ "$code" -eq 0 ] || [ "$code" -eq 2 ] || exit "$code"
+      - store_artifacts:
+          path: phpmd-report.txt
+          destination: phpmd-report.txt
+
+  lint-php-doc-check:
+    executor: php-executor
+    steps:
+      - *attach_workspace
+      - run:
+          name: Install php-doc-check
+          command: composer global require --no-interaction niels-de-blaauw/php-doc-check:0.4.1
+      - run:
+          name: Run php-doc-check
+          command: |
+            set -eo pipefail
+            BIN=$(composer global config bin-dir --absolute --quiet)
+            $BIN/php-doc-check src | tee php-doc-check-report.txt
+      - store_artifacts:
+          path: php-doc-check-report.txt
+          destination: php-doc-check-report.txt
+
   build-docker-image:
     executor: builder-executor
     steps:
@@ -272,6 +344,18 @@ workflows:
           requires:
             - build-setup
       - security-infisical-check
+      - metrics-phpmetrics:
+          requires:
+            - build-setup
+      - metrics-phploc:
+          requires:
+            - build-setup
+      - lint-phpmd:
+          requires:
+            - build-setup
+      - lint-php-doc-check:
+          requires:
+            - build-setup
       - hold:
           type: approval
           filters:
