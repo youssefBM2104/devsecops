@@ -344,7 +344,7 @@ jobs:
     executor: simple-executor
     steps:
       - deploy-over-ssh:
-          fingerprint: "REMPLACER_PAR_LE_FINGERPRINT"
+          fingerprint: "SHA256:3hGrXK+apSeEKw6uWpheMbgoqTntlpRF+HPf+ig1rZM"
           user: STAGING_SSH_USER
           host: STAGING_SSH_HOST
           directory: STAGING_DEPLOY_DIRECTORY
@@ -353,7 +353,7 @@ jobs:
     executor: simple-executor
     steps:
       - deploy-over-ssh:
-          fingerprint: "REMPLACER_PAR_LE_FINGERPRINT"
+          fingerprint: "SHA256:3hGrXK+apSeEKw6uWpheMbgoqTntlpRF+HPf+ig1rZM"
           user: PRODUCTION_SSH_USER
           host: PRODUCTION_SSH_HOST
           directory: PRODUCTION_DEPLOY_DIRECTORY
