@@ -165,6 +165,8 @@ Le job `build-docker-image` :
 4. construit l'image avec `Docker/Dockerfile` en passant les métadonnées en `--build-arg` (date, commit, URL du dépôt, version) ;
 5. pousse l'image avec `docker push`.
 
+Le serveur est durci dans `/etc/ssh/sshd_config.d/99-hardening.conf` : `PasswordAuthentication no` et `PermitRootLogin no`. Une tentative de connexion sans la bonne clé renvoie `Permission denied (publickey)`, et seule la méthode `publickey` est proposée (si le mot de passe était actif, le serveur afficherait `publickey,password`).
+
 #### Variables CircleCI
 
 Les identifiants ne sont **pas** écrits dans le dépôt : ils sont définis dans *Project Settings → Environment Variables*.
@@ -314,3 +316,244 @@ Lors de ce run, `build-docker-image` a échoué une première fois pendant l'env
 
 ![Pipeline complet avec les nouveaux jobs](images/3-pipeline-complet.png)
 *Figure 15 – Pipeline complet : jobs de métriques et de qualité verts, `hold` en attente, `build-docker-image` réussi après re-run*
+
+
+### 3.3 Déploiement automatisé sur AWS EC2
+
+#### Infrastructure
+
+Le déploiement cible une instance **AWS EC2** (région `eu-west-3`, Paris) de type `t3.micro`, avec une **adresse IP élastique** : l'adresse publique ne change pas si l'instance est redémarrée, ce qui permet de la déclarer une fois pour toutes dans CircleCI. L'instance impose **IMDSv2** (protection contre le vol de métadonnées via des requêtes SSRF). Le serveur exécute **Nginx** relié à **PHP 8.3-FPM** par socket Unix (racine : `/var/www/php-devops-tp/public`) ; le code est cloné par HTTPS dans `/var/www/php-devops-tp` et appartient à l'utilisateur dédié `deploy` (le dépôt étant public, aucune clé de déploiement GitHub n'est nécessaire).
+
+![Instance EC2](images/3-3-ec2.png)
+*Figure 16 – Instance EC2 et adresse IP élastique (identifiant du compte AWS masqué)*
+
+#### Authentification SSH par clé
+
+CircleCI se connecte au serveur avec une **paire de clés SSH** dédiée au déploiement :
+
+| Élément | Emplacement |
+|---|---|
+| Clé **publique** | `~deploy/.ssh/authorized_keys` sur le serveur |
+| Clé **privée** | *Project Settings → SSH Keys* de CircleCI, associée à l'adresse IP du serveur. Elle n'est jamais écrite dans le dépôt. |
+| Empreinte (*fingerprint*) | Affichée par CircleCI, utilisée dans le `config.yml` pour sélectionner la clé (ce n'est pas un secret) |
+
+![Clé SSH dans CircleCI](images/3-3-ssh-keys.png)
+*Figure 17 – Clé SSH ajoutée dans CircleCI (hôte et empreinte)*
+
+L'empreinte est écrite **en clair** dans le fichier de configuration, car CircleCI n'interpole pas les variables d'environnement dans `add_ssh_keys`.
+
+#### Variables CircleCI
+
+| Variable | Rôle |
+|---|---|
+| `PRODUCTION_SSH_HOST` | Adresse IP du serveur |
+| `PRODUCTION_SSH_USER` | Utilisateur SSH (`deploy`) |
+| `PRODUCTION_DEPLOY_DIRECTORY` | Dossier de l'application sur le serveur |
+| `STAGING_SSH_HOST`, `STAGING_SSH_USER`, `STAGING_DEPLOY_DIRECTORY` | Mêmes informations pour la préproduction (ici, elles pointent vers la même instance) |
+
+#### Le job `deploy-ssh-production`
+
+Pour éviter de dupliquer le code entre préproduction et production, le déploiement est écrit **une seule fois** dans une commande réutilisable (`deploy-over-ssh`) paramétrée par l'empreinte, l'utilisateur, l'hôte et le dossier. Les deux jobs `deploy-ssh-staging` et `deploy-ssh-production` l'appellent avec leurs propres variables. Les étapes sont :
+
+1. `add_ssh_keys` : charge la clé privée correspondant à l'empreinte ;
+2. `Trust EC2 host key` : `ssh-keyscan -H` enregistre la clé d'hôte du serveur dans `known_hosts` ;
+3. `Deploy to AWS EC2` : ouvre une session SSH et exécute, **sur le serveur**, le script suivant :
+
+```bash
+set -euo pipefail
+cd "$DEPLOY_DIR"
+git fetch origin
+git checkout "$DEPLOY_BRANCH"
+git pull --ff-only origin "$DEPLOY_BRANCH"
+composer install --no-dev --optimize-autoloader --no-interaction --prefer-dist
+PHP_FPM_VERSION=$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')
+(flock -w 10 9 || exit 1; sudo service "php${PHP_FPM_VERSION}-fpm" restart) 9>/tmp/fpm.lock
+```
+
+#### Workflow et garde-fous
+
+Le job `hold` (approbation manuelle) dépend désormais de **tous les jobs de contrôle** (`lint-phpcs`, `security-check-dependencies`, `test-phpunit`, `security-infisical-check`, `metrics-phpmetrics`, `metrics-phploc`, `lint-phpmd`, `lint-php-doc-check`). Il est donc impossible d'approuver un déploiement tant qu'un contrôle est en échec ou n'est pas terminé. `deploy-ssh-production` ne s'exécute qu'après approbation, et seulement sur les branches `main` et `master`.
+
+#### Bonnes pratiques de sécurité et de performance appliquées
+
+| Pratique | Raison |
+|---|---|
+| Approbation manuelle avant la production | Évite un déploiement involontaire |
+| Authentification SSH par clé, mot de passe désactivé | Pas de mot de passe à deviner ou à voler |
+| Clé privée stockée uniquement dans CircleCI | Absente du dépôt et des logs |
+| `ssh-keyscan` au lieu de `StrictHostKeyChecking=no` | Évite de désactiver complètement la vérification de l'hôte |
+| `BatchMode=yes` | La connexion échoue au lieu de rester bloquée sur une question |
+| Heredoc entre guillemets : le script s'exécute entièrement sur le serveur | Aucune variable évaluée par erreur sur le runner |
+| `set -euo pipefail` | Le déploiement s'arrête à la première erreur |
+| `git pull --ff-only` | Refuse tout état de dépôt inattendu (pas de fusion implicite) |
+| `composer install --no-dev --optimize-autoloader` | Aucun outil de développement en production, autoload plus rapide |
+| `flock` autour du redémarrage de PHP-FPM | Empêche deux déploiements simultanés de redémarrer le service en même temps |
+| Version de PHP-FPM détectée sur le serveur | Pas de version codée en dur |
+
+#### Difficultés rencontrées
+
+1. **Variable PHP vide.** Dans le job d'origine, `$(php -v ...)` était évalué sur le runner CircleCI (qui n'a pas PHP) au lieu du serveur, car le heredoc n'était pas protégé : la version de PHP-FPM arrivait vide. Corrigé en protégeant le heredoc et en détectant la version sur le serveur.
+2. **Erreur de configuration `Unclosed '<<' tag`.** Le heredoc `<<'EOF'` entre en conflit avec la syntaxe `<< parameters.x >>` de CircleCI 2.1 : il doit être écrit `\<<'EOF'`. Le pipeline était refusé avant de démarrer. L'erreur a été reproduite et corrigée localement avec le validateur officiel (`circleci config validate`), outil utilisé ensuite avant chaque modification du fichier.
+3. **Empreinte non interpolable.** `add_ssh_keys` n'accepte pas de variable d'environnement : l'empreinte est passée comme paramètre de la commande réutilisable.
+
+#### Résultat
+
+Après approbation du job `hold`, `deploy-ssh-production` s'exécute avec succès (6 secondes). Le journal montre le `git fetch`, la mise à jour en avance rapide (*fast-forward*) du dépôt, puis `composer install` et la régénération de l'autoloader optimisé.
+
+![Pipeline avec déploiement](images/3-3-pipeline-deploy.png)
+*Figure 18 – Pipeline complet : tous les contrôles verts, `hold` approuvé, `deploy-ssh-production` réussi*
+
+![Journal du déploiement](images/3-3-log-deploy.png)
+*Figure 19 – Journal de l'étape « Deploy to AWS EC2 »*
+
+L'application est ensuite accessible à l'adresse publique du serveur et renvoie bien l'image PNG générée (`http://52.47.92.94`).
+
+![Application en production](images/3-3-application.png)
+*Figure 20 – Application déployée sur EC2 (image PNG 600×200)*
+
+#### Limites constatées (reprises en partie 5)
+
+- L'application est servie en **HTTP** (navigateur : « Not Secure ») : il manque un certificat TLS.
+- Le déploiement actuel **n'utilise pas l'image Docker** construite et publiée sur GHCR : le serveur met à jour le code par `git pull`. L'image et le déploiement forment deux chaînes distinctes.
+- `APP_SECRET` n'est pas injecté sur le serveur (le texte « secret » n'apparaît pas dans l'image) : le lien avec Infisical n'existe qu'en CI.
+- `ssh-keyscan` fait confiance à la première clé d'hôte reçue ; l'idéal est de comparer son empreinte avec celle du serveur.
+- Le port 22 est ouvert à Internet (`0.0.0.0/0` dans le groupe de sécurité `php-devops-sg`, comme les ports 80 et 443), car les adresses IP de CircleCI sont variables. La protection repose sur l'authentification par clé uniquement, complétée sur le serveur par un utilisateur `deploy` dédié dont le `sudo` est limité à `service php*-fpm restart`, **fail2ban** et le pare-feu **ufw**.
+- **Préproduction et production sur la même instance** (même IP, même utilisateur `deploy`, même dossier). C'est un choix assumé pour le TP : la production déploie la branche `main`, la préproduction les branches `release/*`, et chaque déploiement passe par l'approbation manuelle `hold`. En situation réelle, il faudrait deux instances séparées ; le nom « php-devops-staging » de l'instance est historique et ne désigne pas un vrai environnement de préproduction.
+- **Écart entre environnements** : l'image Docker utilise Apache avec PHP 8.2 (`php:8.2-apache`), tandis que le serveur EC2 utilise Nginx avec PHP 8.3-FPM, et la CI PHP 8.2. Ce qui est testé n'est donc pas strictement identique à ce qui tourne en production.
+- Le port 443 est ouvert, mais l'application n'est servie qu'en HTTP : aucun certificat TLS n'est encore configuré.
+
+
+## Partie 4 – Documentation et rapport
+
+### 4.1 Documentation du processus
+
+#### Vue d'ensemble
+
+À chaque `git push` sur GitHub, CircleCI exécute le fichier `.circleci/config.yml`. Celui-ci définit deux workflows indépendants :
+
+- **`main_workflow`** : intégration continue (installation, tests, qualité, sécurité, métriques) puis, après approbation manuelle, déploiement sur AWS EC2 ;
+- **`container_workflow`** : construction de l'image Docker et publication sur GHCR.
+
+Le schéma complet figure en 4.2.
+
+#### Structure du fichier `config.yml`
+
+| Section | Contenu |
+|---|---|
+| `executors` | Environnements d'exécution : `php-executor` (`cimg/php:8.2`), `builder-executor` (`cimg/php:8.2-node`), `simple-executor` (`cimg/base:stable`). Tous en classe de ressource `small`. |
+| ancres YAML | `persist_to_workspace` et `attach_workspace` : partagent le code et le dossier `vendor` entre les jobs sans les réinstaller. |
+| `commands` | `deploy-over-ssh` : commande réutilisable qui déploie le code par SSH (paramètres : empreinte de clé, utilisateur, hôte, dossier). |
+| `jobs` | Les 13 jobs décrits ci-dessous. |
+| `workflows` | `main_workflow` et `container_workflow`, avec leurs dépendances (`requires`) et leurs filtres de branches. |
+
+Convention de nommage des jobs, indiquée dans le fichier : un préfixe indique la nature du job (`build-`, `lint-`, `test-`, `security-`, `metrics-`, `deploy-`).
+
+#### Les jobs
+
+| Job | Exécuteur | Rôle | Artefacts |
+|---|---|---|---|
+| `debug-info` | php | Affiche l'environnement d'exécution (utile au diagnostic) | – |
+| `build-setup` | php | `checkout`, cache Composer, `composer install`, partage du workspace | workspace |
+| `lint-phpcs` | php | Style de code PSR-12 et compatibilité PHP (PHP_CodeSniffer, `phpcs.xml`) ; ne bloque pas le pipeline | `phpcs-report` |
+| `security-check-dependencies` | php | Recherche de vulnérabilités connues dans `composer.lock` (`local-php-security-checker`) | `security-report` |
+| `test-phpunit` | php | Tests unitaires (`--testsuite=Unit`) | – |
+| `security-infisical-check` | simple | Authentification à Infisical (Universal Auth) et vérification que `APP_SECRET` est lisible, sans l'afficher | – |
+| `metrics-phpmetrics` | php | Métriques de qualité (complexité, maintenabilité, couplage) | `phpmetrics-report` |
+| `metrics-phploc` | php | Métriques de taille du code | `phploc-report.txt` |
+| `lint-phpmd` | php | Détection de mauvaises pratiques (PHPMD) ; ne bloque pas le pipeline | `phpmd-report.txt` |
+| `lint-php-doc-check` | php | Vérification de la documentation PHPDoc | `php-doc-check-report.txt` |
+| `build-docker-image` | builder | Construction de l'image avec `Docker/Dockerfile` et publication sur GHCR | – |
+| `deploy-ssh-staging` | simple | Déploiement SSH (préproduction) | – |
+| `deploy-ssh-production` | simple | Déploiement SSH (production) | – |
+
+#### Les workflows
+
+**`main_workflow`**
+
+1. `debug-info` et `build-setup` démarrent ensemble. `security-infisical-check` démarre aussi seul (il n'a pas besoin du code).
+2. Dès que `build-setup` est terminé, sept jobs s'exécutent en **parallèle** : `lint-phpcs`, `security-check-dependencies`, `test-phpunit`, `metrics-phpmetrics`, `metrics-phploc`, `lint-phpmd`, `lint-php-doc-check`.
+3. Le job `hold` (type `approval`) attend que **tous les contrôles** soient terminés avec succès, puis attend une **approbation manuelle** dans l'interface CircleCI. Il n'existe que sur les branches `main`, `master` et `release/*`.
+4. Après approbation : `deploy-ssh-production` (branches `main` et `master`) ou `deploy-ssh-staging` (branches `release/*`).
+
+**`container_workflow`** : `build-docker-image` s'exécute sur les branches `main`, `master`, `develop`, `feature/*`, `release/*`, `hotfix/*` et `bugfix/*`. L'image est publiée sous le nom `ghcr.io/<utilisateur>/<dépôt>:<branche>` (nom en minuscules, branche nettoyée).
+
+#### Variables et secrets
+
+| Variable (CircleCI, *Project Settings → Environment Variables*) | Utilisée par | Contenu |
+|---|---|---|
+| `GHCR_USERNAME` | `build-docker-image` | Utilisateur GitHub |
+| `GHCR_PAT` | `build-docker-image` | Jeton GitHub avec la permission `write:packages` |
+| `INFISICAL_CLIENT_ID`, `INFISICAL_CLIENT_SECRET` | `security-infisical-check` | Identifiants de l'identité machine Infisical (Universal Auth) |
+| `STAGING_SSH_HOST`, `STAGING_SSH_USER`, `STAGING_DEPLOY_DIRECTORY` | `deploy-ssh-staging` | Cible du déploiement de préproduction |
+| `PRODUCTION_SSH_HOST`, `PRODUCTION_SSH_USER`, `PRODUCTION_DEPLOY_DIRECTORY` | `deploy-ssh-production` | Cible du déploiement de production |
+| Clé SSH privée (*Project Settings → SSH Keys*) | les deux jobs de déploiement | Clé de connexion au serveur, sélectionnée par son empreinte |
+
+Aucun secret ne figure dans le dépôt Git. Le secret de l'application (`APP_SECRET`) est géré dans Infisical.
+
+#### Procédures
+
+**Lancer le pipeline** : pousser un commit sur GitHub. Les deux workflows démarrent automatiquement.
+
+**Déployer en production** : pousser sur `main`, attendre que les contrôles de `main_workflow` soient verts, ouvrir le pipeline dans CircleCI, puis cliquer sur **Approve job** sur `hold`.
+
+**Ajouter un job** :
+1. définir le job sous `jobs:` avec un nom respectant la convention (préfixe + outil) ;
+2. commencer par `- *attach_workspace` pour récupérer le code et `vendor` ;
+3. installer l'outil avec une **version fixée** (`composer global require paquet:x.y.z`) ;
+4. publier le rapport avec `store_artifacts` ;
+5. déclarer le job dans `workflows`, avec `requires: [build-setup]` ;
+6. **valider le fichier avant le push** avec `circleci config validate`.
+
+**Relancer un job échoué** : dans CircleCI, *Rerun → Rerun failed jobs*. Cela a suffi, par exemple, pour une erreur transitoire de GHCR (`unknown blob`).
+
+**Diagnostiquer un déploiement qui échoue** :
+
+| Symptôme | Cause probable |
+|---|---|
+| Erreur à l'étape `Trust EC2 host key` | Mauvaise adresse dans `*_SSH_HOST` ou port 22 fermé |
+| `Permission denied (publickey)` | La clé publique n'est pas dans `authorized_keys`, ou la mauvaise empreinte est utilisée |
+| Erreur à `composer install` | PHP ou Composer absent du serveur, ou extension `gd` manquante |
+| `sudo` demande un mot de passe | La règle `sudoers` pour `service php*-fpm restart` est absente |
+
+### 4.2 Rapport final
+
+#### Schéma récapitulatif du pipeline
+
+![Schéma du pipeline CI/CD](images/4-schema-pipeline.png)
+*Figure 21 – Fonctionnement du pipeline CI/CD*
+
+#### Défis rencontrés et solutions apportées
+
+| # | Défi | Solution |
+|---|---|---|
+| 1 | Le pipeline était refusé : `Cannot find a definition for job named deploy-ssh-production` | Écriture du job de déploiement en production (partie 3.3) |
+| 2 | `docker build -f docker/Dockerfile` échouait (`lstat docker: no such file`) : Linux est sensible à la casse | Chemin corrigé en `Docker/Dockerfile` |
+| 3 | La construction de l'image échouait à l'installation d'Infisical (`Unable to locate package infisical`) : l'adresse du dépôt de paquets renvoyait une erreur 404, masquée par `curl \| bash` | Nouvelle adresse du script d'installation (`artifacts-cli.infisical.com`) |
+| 4 | Les exécuteurs utilisaient PHP 8.1 alors que `composer.json` exige PHP ≥ 8.2 | Images `cimg/php:8.2` |
+| 5 | `test-phpunit` échouait : `composer require phpunit/phpunit` sans contrainte choisissait PHPUnit 13, incompatible | Étape supprimée (PHPUnit est déjà installé par `build-setup`). Cause trouvée en **reproduisant le job localement** |
+| 6 | `build-docker-image` rejeté : version de Remote Docker obsolète et mise en cache de couches indisponible sur le plan gratuit | `version: default` et suppression de `docker_layer_caching` |
+| 7 | L'image démarrait mais l'application échouait (`vendor/autoload.php` introuvable) : `vendor` est exclu par `.dockerignore` | `composer install` exécuté dans le conteneur (documenté en 1.2) |
+| 8 | Conflit de dépendances en installant les quatre outils de qualité ensemble (`php-doc-check`) | Un job par outil, chacun dans son conteneur, avec versions fixées |
+| 9 | PHPMD retourne le code 2 en cas de violations, ce qui aurait fait échouer le job, et un `tee` masquait les erreurs | Code 0 ou 2 accepté, tout autre code échoue ; `set -eo pipefail` |
+| 10 | Erreur transitoire de GHCR (`unknown blob`) pendant le push de l'image (1,1 Go) | Re-run du workflow (la configuration n'était pas en cause) |
+| 11 | Déploiement d'origine défaillant : variables évaluées sur le runner CircleCI au lieu du serveur, `StrictHostKeyChecking=no`, étape `deploy` dépréciée | Heredoc protégé exécuté sur le serveur, `ssh-keyscan`, étapes `run` |
+| 12 | `Unclosed '<<' tag` : le heredoc entre en conflit avec la syntaxe des paramètres de CircleCI 2.1 | Écriture `\<<'EOF'`, validation avec `circleci config validate` |
+| 13 | L'empreinte de la clé SSH ne peut pas venir d'une variable d'environnement | Empreinte passée comme paramètre de la commande réutilisable |
+| 14 | Lecture d'une empreinte sur une capture d'écran : `I` majuscule et `l` minuscule indiscernables | Empreinte copiée en texte (jamais retranscrite à l'œil) |
+
+#### Résultats obtenus
+
+- Un pipeline qui s'exécute à chaque `push`, avec **13 jobs** et **2 workflows**, tous verts.
+- Des **contrôles automatiques** : style de code, tests, analyse des dépendances, détection de mauvaises pratiques, documentation du code, et vérification de l'accès aux secrets.
+- Des **rapports** (métriques, analyses) conservés comme artefacts de chaque exécution.
+- Une **image Docker** construite automatiquement et publiée sur GHCR.
+- Une gestion des **secrets** centralisée dans Infisical, sans secret dans le dépôt.
+- Un **déploiement continu** vers AWS EC2, protégé par une approbation manuelle qui n'est possible que lorsque tous les contrôles ont réussi.
+- L'application est accessible en production et renvoie l'image PNG attendue.
+
+#### Enseignements
+
+- **Reproduire localement** (dans la même image Docker que la CI) permet de trouver la vraie cause d'un échec avant de modifier la configuration : c'est ce qui a permis de corriger `test-phpunit` et de valider les quatre nouveaux jobs.
+- **Valider la configuration avec l'outil officiel** (`circleci config validate`) avant chaque push évite les pipelines refusés.
+- **Figer les versions** des outils rend les résultats reproductibles.
+- Les limites restantes (HTTPS, image Docker non utilisée pour le déploiement, secret non injecté en production, environnements non identiques) sont traitées dans la partie 5.
