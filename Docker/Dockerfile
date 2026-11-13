@@ -65,7 +65,7 @@ RUN docker-php-ext-configure gd --with-freetype --with-jpeg \
 
 # Install Infisical cli
 RUN apt-get install -y bash curl \
-    && curl -1sLf 'https://dl.cloudsmith.io/public/infisical/infisical-cli/setup.deb.sh' | bash \
+    && curl -1sLf 'https://artifacts-cli.infisical.com/setup.deb.sh' | bash \
     && apt-get update \
     && apt-get install -y infisical
 
