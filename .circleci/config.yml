@@ -97,7 +97,7 @@ commands:
           command: |
             # Heredoc entre quotes : rien n'est évalué sur le runner CircleCI, tout s'exécute sur le serveur
             ssh -o BatchMode=yes "${<< parameters.user >>}@${<< parameters.host >>}" \
-              "DEPLOY_DIR='${<< parameters.directory >>}' DEPLOY_BRANCH='${CIRCLE_BRANCH}' bash -s" <<'EOF'
+              "DEPLOY_DIR='${<< parameters.directory >>}' DEPLOY_BRANCH='${CIRCLE_BRANCH}' bash -s" \<<'EOF'
             set -euo pipefail
             cd "$DEPLOY_DIR"
             git fetch origin
