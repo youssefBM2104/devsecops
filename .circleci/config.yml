@@ -204,6 +204,31 @@ jobs:
             docker push $REPOSITORY:$TAG
 
 
+  security-infisical-check:
+    executor: simple-executor
+    environment:
+      INFISICAL_PROJECT_ID: 7e50aba9-be5a-4b88-9dfd-9e936ce8010d
+      INFISICAL_ENV: dev
+    steps:
+      - run:
+          name: Install Infisical CLI
+          command: |
+            curl -1sLf 'https://artifacts-cli.infisical.com/setup.deb.sh' | sudo -E bash
+            sudo apt-get update
+            sudo apt-get install -y infisical
+      - run:
+          name: Authenticate (Universal Auth) and check that APP_SECRET is readable
+          command: |
+            # Les identifiants viennent des variables CircleCI, jamais du dépôt
+            INFISICAL_TOKEN=$(infisical login --method=universal-auth \
+              --client-id="$INFISICAL_CLIENT_ID" \
+              --client-secret="$INFISICAL_CLIENT_SECRET" \
+              --silent --plain)
+            # La valeur du secret n'est jamais affichée
+            infisical run --token "$INFISICAL_TOKEN" \
+              --projectId "$INFISICAL_PROJECT_ID" --env "$INFISICAL_ENV" \
+              -- sh -c 'test -n "$APP_SECRET" && echo "APP_SECRET is available from Infisical"'
+
   deploy-ssh-staging:
     executor: simple-executor
     steps:
@@ -246,6 +271,7 @@ workflows:
       - test-phpunit:
           requires:
             - build-setup
+      - security-infisical-check
       - hold:
           type: approval
           filters:
