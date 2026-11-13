@@ -54,12 +54,12 @@ executors:
     shell: /bin/bash
     docker:
       - name: localhost
-        image: cimg/php:8.1
+        image: cimg/php:8.2
   builder-executor:
     resource_class: small
     shell: /bin/bash
     docker:
-      - image: cimg/php:8.1-node
+      - image: cimg/php:8.2-node
         name: localhost
   simple-executor:
     resource_class: small
@@ -193,7 +193,7 @@ jobs:
 
             # Build the Docker image
             docker build \
-            -f docker/Dockerfile \
+            -f Docker/Dockerfile \
             -t $REPOSITORY:$TAG \
             --build-arg BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ") \
             --build-arg TAG="${TAG}" \
@@ -227,8 +227,13 @@ jobs:
             EOF
 
 
-#  deploy-ssh-production:
-# It's up to you :)
+  # TODO (partie 3.3) : remplacer ce job temporaire par le vrai déploiement sur AWS EC2
+  deploy-ssh-production:
+    executor: simple-executor
+    steps:
+      - run:
+          name: Placeholder production deployment
+          command: echo "Production deployment not implemented yet"
 
 
 workflows:
