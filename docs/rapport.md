@@ -101,3 +101,33 @@ Après cette commande, `http://localhost:8080/` renvoie bien une image PNG de 60
 
 ![Résultat de l'application dans le navigateur](images/1-2-resultat.png)
 *Figure 2 – Image générée par l'application (http://localhost:8080/)*
+
+
+## Partie 2 – Mise en place du pipeline CI/CD
+
+### 2.1 Configuration de GitHub et CircleCI
+
+#### GitHub
+
+Le code du projet a été versionné dans un dépôt GitHub (`youssefBM2104/devsecops`, branche `main`).
+
+#### CircleCI
+
+1. Connexion à CircleCI avec le compte GitHub et autorisation de l'application.
+2. Dans **Projects**, sélection du dépôt `devsecops` puis **Set Up Project**.
+3. Choix de l'option utilisant le fichier **`.circleci/config.yml` déjà présent dans le dépôt** (branche `main`), afin de ne pas le remplacer par une configuration générée.
+4. CircleCI enregistre alors un webhook et une clé de déploiement sur le dépôt GitHub : chaque `push` déclenche désormais un pipeline.
+
+#### Premier pipeline
+
+Le premier pipeline ne s'exécute pas (statut **Not Run**) et affiche l'erreur suivante :
+
+```
+Error calling workflow: 'main_workflow'
+Cannot find a definition for job named deploy-ssh-production
+```
+
+Ce comportement est attendu : le workflow `main_workflow` fait référence au job `deploy-ssh-production`, qui n'est pas défini dans le fichier (c'est le job manquant à écrire dans le sujet). La liaison GitHub ↔ CircleCI est donc fonctionnelle .
+
+![Premier pipeline CircleCI en erreur](images/2-1-premier-pipeline.png)
+*Figure 3 – Premier pipeline : erreur de configuration (job `deploy-ssh-production` manquant)*
